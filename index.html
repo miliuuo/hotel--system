@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>酒店蛇仔 468 工時管理系統 (24小時制)</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Vue 3 -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-800 font-sans pb-12">
+  <div id="app" class="max-w-6xl mx-auto px-4 py-6">
+    
+    <!-- 頂部 Header -->
+    <header class="bg-white rounded-2xl shadow-sm p-6 mb-6 border border-slate-200 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900 flex items-center gap-2">
+          <i class="fa-solid me-2 fa-hotel text-indigo-600"></i>酒店蛇仔 468 工時管理系統
+        </h1>
+        <p class="text-xs text-slate-500 mt-1">連續4個星期不得超過68小時 | 支援 24 小時制輸入</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button @click="showImportModal = true" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition flex items-center gap-2 shadow-sm">
+          <i class="fa-solid fa-paste"></i> 一鍵貼上更表
+        </button>
+        <button @click="showAddWorkerModal = true" class="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-xl text-sm font-medium transition flex items-center gap-2 shadow-sm">
+          <i class="fa-solid fa-user-plus"></i> 新增蛇仔
+        </button>
+        <button @click="exportData" class="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-3 py-2 rounded-xl text-sm font-medium transition">
+          <i class="fa-solid fa-download"></i> 備份
+        </button>
+      </div>
+    </header>
+
+    <!-- 頂部統計卡片 (Dashboard) -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+      <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+        <div class="text-slate-500 text-xs font-medium">總蛇仔人數</div>
+        <div class="text-2xl font-bold text-slate-800 mt-1">{{ workers.length }} 人</div>
+      </div>
+      <div class="bg-white p-4 rounded-xl border border-red-200 shadow-sm bg-red-50/30">
+        <div class="text-red-600 text-xs font-medium flex items-center gap-1">
+          <i class="fa-solid fa-circle-exclamation"></i> 高危/即將爆鐘 (>60h)
+        </div>
+        <div class="text-2xl font-bold text-red-600 mt-1">{{ dangerCount }} 人</div>
+      </div>
+      <div class="bg-white p-4 rounded-xl border border-amber-200 shadow-sm bg-amber-50/30">
+        <div class="text-amber-600 text-xs font-medium flex items-center gap-1">
+          <i class="fa-solid fa-triangle-exclamation"></i> 需預警/注意 (50-60h)
+        </div>
+        <div class="text-2xl font-bold text-amber-600 mt-1">{{ warningCount }} 人</div>
+      </div>
+      <div class="bg-white p-4 rounded-xl border border-emerald-200 shadow-sm bg-emerald-50/30">
+        <div class="text-emerald-600 text-xs font-medium flex items-center gap-1">
+          <i class="fa-solid fa-shield-halved"></i> 安全區 (<50h)
+        </div>
+        <div class="text-2xl font-bold text-emerald-600 mt-1">{{ safeCount }} 人</div>
+      </div>
+    </div>
+
+    <!-- 搜尋與過濾區 -->
+    <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 mb-6 flex flex-col md:flex-row gap-4 justify-between items-center">
+      <div class="relative w-full md:w-96">
+        <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-3 text-slate-400 text-sm"></i>
+        <input 
+          v-model="searchQuery" 
+          type="text" 
+          placeholder="搜尋蛇仔名字、標籤..." 
+          class="w-full pl-10 pr-4 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition"
+        >
+      </div>
+      <div class="flex gap-2 w-full md:w-auto">
+        <button 
+          v-for="filter in ['全部', '高危爆鐘', '預警區', '安全區']" 
+          :key="filter"
+          @click="statusFilter = filter"
+          :class="[
+            'px-3 py-1.5 text-xs font-medium rounded-lg transition',
+            statusFilter === filter ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+          ]"
+        >
+          {{ filter }}
+        </button>
+      </div>
+    </div>
+
+    <!-- 蛇仔列表 -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div 
+        v-for="worker in filteredWorkers" 
+        :key="worker.id"
+        class="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm hover:shadow-md transition relative flex flex-col justify-between"
+      >
+        <div>
+          <div class="flex justify-between items-start mb-2">
+            <div>
+              <h3 class="font-bold text-lg text-slate-800 flex items-center gap-2">
+                {{ worker.name }}
+              </h3>
+              <div class="flex flex-wrap gap-1 mt-1">
+                <span 
+                  v-for="(tag, idx) in worker.tags" 
+                  :key="idx"
+                  class="bg-slate-100 text-slate-600 text-[10px] px-2 py-0.5 rounded-md border border-slate-200"
+                >
+                  {{ tag }}
+                </span>
+              </div>
+            </div>
+            <span :class="getStatusBadgeClass(worker.recent4WeekHours)">
+              {{ getStatusText(worker.recent4WeekHours) }}
+            </span>
+          </div>
+
+          <div class="mt-4">
+            <div class="flex justify-between items-baseline mb-1">
+              <span class="text-xs text-slate-500 font-medium">近 4 個星期累積工時</span>
+              <span class="text-sm font-extrabold" :class="getHoursColorClass(worker.recent4WeekHours)">
+                {{ worker.recent4WeekHours }} / 68 小時
+              </span>
+            </div>
+            <div class="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
+              <div 
+                class="h-2.5 rounded-full transition-all duration-500" 
+                :class="getProgressBarClass(worker.recent4WeekHours)"
+                :style="{ width: Math.min((worker.recent4WeekHours / 68) * 100, 100) + '%' }"
+              ></div>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-1">
+              剩餘可排更時數：<strong class="text-slate-600">{{ Math.max(68 - worker.recent4WeekHours, 0) }} 小時</strong>
+            </p>
+          </div>
+        </div>
+
+        <div class="mt-5 pt-3 border-t border-slate-100 flex justify-between items-center text-xs">
+          <span class="text-slate-400">總返工次數: {{ worker.shifts ? worker.shifts.length : 0 }} 次</span>
+          <div class="flex gap-2">
+            <button @click="openShiftHistory(worker)" class="text-indigo-600 hover:text-indigo-800 font-medium">
+              查看紀錄
+            </button>
+            <button @click="deleteWorker(worker.id)" class="text-slate-300 hover:text-red-500">
+              <i class="fa-solid fa-trash"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 模態框：一鍵匯入更表文字 -->
+    <div v-if="showImportModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl max-w-xl w-full p-6 shadow-xl border border-slate-200">
+        <h2 class="text-lg font-bold text-slate-800 mb-2 flex items-center gap-2">
+          <i class="fa-solid fa-paste text-indigo-600"></i> 貼上更表文字匯入工時
+        </h2>
+        <p class="text-xs text-slate-500 mb-4">
+          直接貼上更表文字，系統自動辨識日期、開工時間及蛇仔名字。
+        </p>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">年份</label>
+            <input type="number" v-model="importYear" class="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl p-2">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">預設收工時間 (24小時制)</label>
+            <input type="number" v-model.number="defaultEndHour" class="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl p-2" min="1" max="24">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">時間模式</label>
+            <select v-model="timeMode" class="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl p-2">
+              <option value="24h">24 小時制（如：11點, 17點, 19:00）</option>
+              <option value="12h">12 小時口語（如：5點=17:00）</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="mb-4">
+          <label class="block text-xs font-semibold text-slate-700 mb-1">更表內容</label>
+          <textarea 
+            v-model="importText" 
+            rows="8" 
+            class="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          ></textarea>
+        </div>
+
+        <div class="flex justify-end gap-2">
+          <button @click="showImportModal = false" class="px-4 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl">取消</button>
+          <button @click="processImport" class="px-4 py-2 text-xs font-medium bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl">解析並匯入紀錄</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 模態框：手動新增蛇仔 -->
+    <div v-if="showAddWorkerModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl">
+        <h2 class="text-lg font-bold text-slate-800 mb-4">新增蛇仔</h2>
+        <div class="space-y-3 mb-4">
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">名字</label>
+            <input v-model="newWorker.name" type="text" class="w-full text-sm border border-slate-200 rounded-xl p-2.5">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">標籤/備註 (用逗點分開)</label>
+            <input v-model="newWorker.tagsInput" type="text" class="w-full text-sm border border-slate-200 rounded-xl p-2.5">
+          </div>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button @click="showAddWorkerModal = false" class="px-4 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl">取消</button>
+          <button @click="addWorker" class="px-4 py-2 text-xs font-medium bg-indigo-600 text-white rounded-xl">新增</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 模態框：個人返工歷史紀錄 -->
+    <div v-if="selectedWorker" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl max-h-[80vh] flex flex-col">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-lg font-bold text-slate-800">{{ selectedWorker.name }} - 返工明細</h2>
+          <button @click="selectedWorker = null" class="text-slate-400 hover:text-slate-600">
+            <i class="fa-solid fa-xmark text-lg"></i>
+          </button>
+        </div>
+        <div class="overflow-y-auto flex-1 pr-1">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-50 text-slate-500 border-b">
+              <tr>
+                <th class="p-2">日期</th>
+                <th class="p-2">時間段 (24h)</th>
+                <th class="p-2">工時（可修改）</th>
+                <th class="p-2">操作</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y">
+              <tr v-for="(shift, idx) in selectedWorker.shifts" :key="idx">
+                <td class="p-2 font-medium">{{ shift.date }}</td>
+                <td class="p-2 text-slate-500">{{ shift.startTime }} - {{ shift.endTime || '23:00' }}</td>
+                <td class="p-2">
+                  <input 
+                    type="number" 
+                    v-model.number="shift.hours" 
+                    class="w-16 p-1 border border-slate-200 rounded text-center font-bold text-indigo-600"
+                    min="0"
+                  > 小時
+                </td>
+                <td class="p-2">
+                  <button @click="removeShift(selectedWorker.id, idx)" class="text-red-400 hover:text-red-600">
+                    <i class="fa-solid fa-trash-can"></i>
+                  </button>
+                </td>
+              </tr>
+              <tr v-if="!selectedWorker.shifts || selectedWorker.shifts.length === 0">
+                <td colspan="4" class="p-4 text-center text-slate-400">暫無返工紀錄</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const { createApp, ref, computed, onMounted, watch } = Vue;
+
+    createApp({
+      setup() {
+        const workers = ref([]);
+        const searchQuery = ref('');
+        const statusFilter = ref('全部');
+        const showImportModal = ref(false);
+        const showAddWorkerModal = ref(false);
+        const selectedWorker = ref(null);
+        
+        const importYear = ref(new Date().getFullYear());
+        const defaultEndHour = ref(23); // 預設晚上 23:00 收工
+        const timeMode = ref('24h');    // 預設採用 24 小時制
+        const importText = ref('');
+        const newWorker = ref({ name: '', tagsInput: '' });
+
+        const initDefaultData = () => {
+          const saved = localStorage.getItem('hotel_workers_468');
+          if (saved) {
+            workers.value = JSON.parse(saved);
+          }
+        };
+
+        watch(workers, (newVal) => {
+          localStorage.setItem('hotel_workers_468', JSON.stringify(newVal));
+        }, { deep: true });
+
+        // 累加連續 4 個星期的總工時
+        const calculate4WeekHours = (shifts) => {
+          if (!shifts || shifts.length === 0) return 0;
+          return shifts.reduce((total, s) => total + (Number(s.hours) || 0), 0);
+        };
+
+        const workersWithHours = computed(() => {
+          return workers.value.map(w => ({
+            ...w,
+            recent4WeekHours: calculate4WeekHours(w.shifts)
+          }));
+        });
+
+        const filteredWorkers = computed(() => {
+          return workersWithHours.value.filter(w => {
+            const matchesSearch = w.name.includes(searchQuery.value) || 
+              (w.tags && w.tags.some(t => t.includes(searchQuery.value)));
+            
+            let matchesStatus = true;
+            if (statusFilter.value === '高危爆鐘') matchesStatus = w.recent4WeekHours > 60;
+            else if (statusFilter.value === '預警區') matchesStatus = w.recent4WeekHours >= 50 && w.recent4WeekHours <= 60;
+            else if (statusFilter.value === '安全區') matchesStatus = w.recent4WeekHours < 50;
+
+            return matchesSearch && matchesStatus;
+          });
+        });
+
+        const dangerCount = computed(() => workersWithHours.value.filter(w => w.recent4WeekHours > 60).length);
+        const warningCount = computed(() => workersWithHours.value.filter(w => w.recent4WeekHours >= 50 && w.recent4WeekHours <= 60).length);
+        const safeCount = computed(() => workersWithHours.value.filter(w => w.recent4WeekHours < 50).length);
+
+        const getStatusBadgeClass = (hrs) => {
+          if (hrs > 60) return 'bg-red-100 text-red-700 font-bold text-xs px-2.5 py-1 rounded-full border border-red-200';
+          if (hrs >= 50) return 'bg-amber-100 text-amber-700 font-bold text-xs px-2.5 py-1 rounded-full border border-amber-200';
+          return 'bg-emerald-100 text-emerald-700 font-bold text-xs px-2.5 py-1 rounded-full border border-emerald-200';
+        };
+
+        const getStatusText = (hrs) => {
+          if (hrs > 60) return '即將爆鐘';
+          if (hrs >= 50) return '注意預警';
+          return '安全';
+        };
+
+        const getHoursColorClass = (hrs) => {
+          if (hrs > 60) return 'text-red-600';
+          if (hrs >= 50) return 'text-amber-600';
+          return 'text-emerald-600';
+        };
+
+        const getProgressBarClass = (hrs) => {
+          if (hrs > 60) return 'bg-red-500';
+          if (hrs >= 50) return 'bg-amber-500';
+          return 'bg-emerald-500';
+        };
+
+        // 24 小時制精準解析邏輯
+        const processImport = () => {
+          if (!importText.value.trim()) return;
+
+          const lines = importText.value.split('\n');
+          let currentDateStr = '';
+          let currentStartHour = 17; // 預設 17:00
+
+          lines.forEach(line => {
+            const cleanLine = line.trim();
+            if (!cleanLine) return;
+
+            // 1. 匹配日期 (例如：10月3號, 10/3, 10-3)
+            const dateMatch = cleanLine.match(/(\d{1,2})[月\/\-](\d{1,2})/);
+            if (dateMatch) {
+              const month = dateMatch[1].padStart(2, '0');
+              const day = dateMatch[2].padStart(2, '0');
+              currentDateStr = `${importYear.value}-${month}-${day}`;
+              return;
+            }
+
+            // 2. 匹配 24 小時制時間 (例如：11:00, 17:00, 11點, 17點)
+            const timeColMatch = cleanLine.match(/(\d{1,2})[:：](\d{2})/);
+            const pointMatch = cleanLine.match(/(\d{1,2})\s*點/);
+
+            if (timeColMatch) {
+              currentStartHour = parseInt(timeColMatch[1]);
+              return;
+            } else if (pointMatch) {
+              let h = parseInt(pointMatch[1]);
+              if (timeMode.value === '12h') {
+                if (h < 10) h += 12; // 12小時制口語轉換
+              }
+              currentStartHour = h;
+              return;
+            }
+
+            // 3. 匹配人名
+            const nameMatch = cleanLine.match(/^(?:\d+[\.、\s]*)?([^\s（(]+)\s*(.*)/);
+            if (nameMatch && currentDateStr) {
+              const name = nameMatch[1].trim();
+              const rawTag = nameMatch[2].trim();
+
+              // 計算工時 (預設收工時間 - 開工時間)
+              const endH = defaultEndHour.value || 23;
+              const hours = Math.max(endH - currentStartHour, 0);
+
+              const startTimeStr = `${currentStartHour.toString().padStart(2, '0')}:00`;
+              const endTimeStr = `${endH.toString().padStart(2, '0')}:00`;
+
+              let worker = workers.value.find(w => w.name === name);
+              if (!worker) {
+                const tags = [];
+                if (rawTag) tags.push(rawTag.replace(/[（）()]/g, ''));
+                worker = {
+                  id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
+                  name: name,
+                  tags: tags,
+                  shifts: []
+                };
+                workers.value.push(worker);
+              }
+
+              worker.shifts.push({
+                date: currentDateStr,
+                startTime: startTimeStr,
+                endTime: endTimeStr,
+                hours: hours
+              });
+            }
+          });
+
+          importText.value = '';
+          showImportModal.value = false;
+          alert('更表解析成功！工時已即時更新。');
+        };
+
+        const addWorker = () => {
+          if (!newWorker.value.name.trim()) return;
+          const tags = newWorker.value.tagsInput 
+            ? newWorker.value.tagsInput.split(/[,，]/).map(t => t.trim()).filter(Boolean)
+            : [];
+
+          workers.value.push({
+            id: Date.now().toString(),
+            name: newWorker.value.name.trim(),
+            tags: tags,
+            shifts: []
+          });
+
+          newWorker.value = { name: '', tagsInput: '' };
+          showAddWorkerModal.value = false;
+        };
+
+        const deleteWorker = (id) => {
+          if (confirm('確定要刪除這位蛇仔及所有工時紀錄？')) {
+            workers.value = workers.value.filter(w => w.id !== id);
+          }
+        };
+
+        const openShiftHistory = (worker) => {
+          selectedWorker.value = worker;
+        };
+
+        const removeShift = (workerId, shiftIdx) => {
+          const w = workers.value.find(x => x.id === workerId);
+          if (w) {
+            w.shifts.splice(shiftIdx, 1);
+          }
+        };
+
+        const exportData = () => {
+          const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(workers.value, null, 2));
+          const dlAnchorElem = document.createElement('a');
+          dlAnchorElem.setAttribute("href", dataStr);
+          dlAnchorElem.setAttribute("download", `hotel_workers_backup_${new Date().toISOString().slice(0,10)}.json`);
+          dlAnchorElem.click();
+        };
+
+        onMounted(initDefaultData);
+
+        return {
+          workers,
+          searchQuery,
+          statusFilter,
+          filteredWorkers,
+          dangerCount,
+          warningCount,
+          safeCount,
+          showImportModal,
+          showAddWorkerModal,
+          selectedWorker,
+          importYear,
+          defaultEndHour,
+          timeMode,
+          importText,
+          newWorker,
+          getStatusBadgeClass,
+          getStatusText,
+          getHoursColorClass,
+          getProgressBarClass,
+          processImport,
+          addWorker,
+          deleteWorker,
+          openShiftHistory,
+          removeShift,
+          exportData
+        };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>
