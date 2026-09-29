@@ -224,42 +224,63 @@
           </button>
         </div>
         <div class="overflow-y-auto flex-1 pr-1">
-          <table class="w-full text-left text-xs">
-            <thead class="bg-slate-50 text-slate-500 border-b">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-slate-50 text-slate-500 border-b text-xs">
               <tr>
                 <th class="p-2 w-1/4">日期</th>
-                <th class="p-2 w-5/12">時間段 (可修改)</th>
-                <th class="p-2 w-1/4">工時 (可微調)</th>
+                <th class="p-2 w-5/12">時間段</th>
+                <th class="p-2 w-1/4">工時</th>
                 <th class="p-2">操作</th>
               </tr>
             </thead>
-            <tbody class="divide-y">
-              <tr v-for="(shift, idx) in selectedWorker.shifts" :key="idx">
-                <td class="p-2 font-medium">{{ shift.date }}</td>
-                <!-- 這裡改成可編輯的時間輸入框 -->
-                <td class="p-2 flex items-center gap-1">
-                  <input 
-                    type="time" 
-                    v-model="shift.startTime" 
-                    @change="updateShiftTime(shift)" 
-                    class="p-1 border border-slate-200 rounded text-center font-medium bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 focus:outline-none transition"
-                  >
-                  <span class="text-slate-400">-</span>
-                  <input 
-                    type="time" 
-                    v-model="shift.endTime" 
-                    @change="updateShiftTime(shift)" 
-                    class="p-1 border border-slate-200 rounded text-center font-medium bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 focus:outline-none transition"
-                  >
-                </td>
+            <tbody class="divide-y text-slate-700">
+              <tr v-for="(shift, idx) in selectedWorker.shifts" :key="idx" class="hover:bg-slate-50/50 transition">
+                <td class="p-2 font-medium text-sm">{{ shift.date }}</td>
+                
+                <!-- 時間段 (顯示與編輯切換) -->
                 <td class="p-2">
-                  <input 
-                    type="number" 
-                    step="0.5"
-                    v-model.number="shift.hours" 
-                    class="w-14 p-1 border border-slate-200 rounded text-center font-bold text-indigo-600"
-                    min="0"
-                  > <span class="text-slate-500">小時</span>
+                  <!-- 顯示模式 -->
+                  <div v-if="editingShiftIdx !== idx" class="flex items-center gap-2">
+                    <span class="font-semibold bg-white border border-slate-200 px-2 py-1 rounded text-slate-700">
+                      {{ shift.startTime }} - {{ shift.endTime }}
+                    </span>
+                    <!-- 筆仔按鈕 -->
+                    <button @click="editingShiftIdx = idx" class="text-slate-400 hover:text-indigo-600 transition" title="修改時間">
+                      <i class="fa-solid fa-pen-to-square"></i>
+                    </button>
+                  </div>
+
+                  <!-- 編輯模式 -->
+                  <div v-else class="flex items-center gap-1">
+                    <input 
+                      type="time" 
+                      v-model="shift.startTime" 
+                      class="p-1 w-24 border border-slate-300 rounded text-center text-sm font-medium focus:ring-2 focus:ring-indigo-500 outline-none"
+                    >
+                    <span class="text-slate-400">-</span>
+                    <input 
+                      type="time" 
+                      v-model="shift.endTime" 
+                      class="p-1 w-24 border border-slate-300 rounded text-center text-sm font-medium focus:ring-2 focus:ring-indigo-500 outline-none"
+                    >
+                    <!-- 儲存按鈕 -->
+                    <button @click="saveShiftTime(shift)" class="text-emerald-600 hover:text-emerald-700 ml-1 p-1 bg-emerald-50 rounded" title="儲存並計算">
+                      <i class="fa-solid fa-check"></i>
+                    </button>
+                  </div>
+                </td>
+
+                <td class="p-2">
+                  <div class="flex items-center gap-1">
+                    <input 
+                      type="number" 
+                      step="0.5"
+                      v-model.number="shift.hours" 
+                      class="w-16 p-1 border border-transparent hover:border-slate-200 focus:border-indigo-500 rounded text-center font-bold text-indigo-600 bg-transparent transition focus:bg-white focus:outline-none"
+                      min="0"
+                    >
+                    <span class="text-slate-500 text-xs">小時</span>
+                  </div>
                 </td>
                 <td class="p-2">
                   <button @click="removeShift(selectedWorker.id, idx)" class="text-red-400 hover:text-red-600">
@@ -290,6 +311,9 @@
         const showAddWorkerModal = ref(false);
         const selectedWorker = ref(null);
         
+        // 追蹤目前正在編輯哪一行的時間
+        const editingShiftIdx = ref(null);
+
         const importYear = ref(new Date().getFullYear());
         const defaultEndHour = ref(23); // 預設晚上 23:00 收工
         const timeMode = ref('24h');    // 預設採用 24 小時制
@@ -362,19 +386,17 @@
           return 'bg-emerald-500';
         };
 
-        // 24 小時制精準解析邏輯
         const processImport = () => {
           if (!importText.value.trim()) return;
 
           const lines = importText.value.split('\n');
           let currentDateStr = '';
-          let currentStartHour = 17; // 預設 17:00
+          let currentStartHour = 17; 
 
           lines.forEach(line => {
             const cleanLine = line.trim();
             if (!cleanLine) return;
 
-            // 1. 匹配日期 (例如：10月3號, 10/3, 10-3)
             const dateMatch = cleanLine.match(/(\d{1,2})[月\/\-](\d{1,2})/);
             if (dateMatch) {
               const month = dateMatch[1].padStart(2, '0');
@@ -383,7 +405,6 @@
               return;
             }
 
-            // 2. 匹配 24 小時制時間 (例如：11:00, 17:00, 11點, 17點)
             const timeColMatch = cleanLine.match(/(\d{1,2})[:：](\d{2})/);
             const pointMatch = cleanLine.match(/(\d{1,2})\s*點/);
 
@@ -393,19 +414,17 @@
             } else if (pointMatch) {
               let h = parseInt(pointMatch[1]);
               if (timeMode.value === '12h') {
-                if (h < 10) h += 12; // 12小時制口語轉換
+                if (h < 10) h += 12; 
               }
               currentStartHour = h;
               return;
             }
 
-            // 3. 匹配人名
             const nameMatch = cleanLine.match(/^(?:\d+[\.、\s]*)?([^\s（(]+)\s*(.*)/);
             if (nameMatch && currentDateStr) {
               const name = nameMatch[1].trim();
               const rawTag = nameMatch[2].trim();
 
-              // 計算工時 (預設收工時間 - 開工時間)
               const endH = defaultEndHour.value || 23;
               const hours = Math.max(endH - currentStartHour, 0);
 
@@ -464,6 +483,7 @@
 
         const openShiftHistory = (worker) => {
           selectedWorker.value = worker;
+          editingShiftIdx.value = null; // 打開明細時重置編輯狀態
         };
 
         const removeShift = (workerId, shiftIdx) => {
@@ -473,8 +493,8 @@
           }
         };
 
-        // 新增函數：當修改時間時，自動計算工時
-        const updateShiftTime = (shift) => {
+        // 按下儲存按鈕時執行：計算工時並退出編輯模式
+        const saveShiftTime = (shift) => {
           if (!shift.startTime || !shift.endTime) return;
 
           try {
@@ -488,16 +508,18 @@
 
             let hours = endTotal - startTotal;
             
-            // 如果收工時間早於開工時間，視為跨夜 (例如: 22:00 返到 07:00)
+            // 跨夜處理
             if (hours < 0) {
               hours += 24;
             }
 
-            // 四捨五入至小數點後兩位，並更新工時輸入框
             shift.hours = Math.round(hours * 100) / 100;
           } catch (e) {
             console.error("時間解析錯誤", e);
           }
+
+          // 關閉編輯模式
+          editingShiftIdx.value = null;
         };
 
         const exportData = () => {
@@ -521,6 +543,7 @@
           showImportModal,
           showAddWorkerModal,
           selectedWorker,
+          editingShiftIdx, // 回傳給 HTML 控制介面
           importYear,
           defaultEndHour,
           timeMode,
@@ -535,7 +558,7 @@
           deleteWorker,
           openShiftHistory,
           removeShift,
-          updateShiftTime, // 匯出新函數供 Template 使用
+          saveShiftTime, // 儲存並計算的 function
           exportData
         };
       }
