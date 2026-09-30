@@ -318,15 +318,140 @@
         const importText = ref('');
         const newWorker = ref({ name: '', tagsInput: '' });
 
-        const initDefaultData = () => {
-          const saved = localStorage.getItem('hotel_workers_468');
-          if (saved) {
-            workers.value = JSON.parse(saved);
+        // Google Apps Script Web App API
+        const API_URL = 'https://script.google.com/macros/s/AKfycbxyWUe4FtmszGxcZEDEeeoQ73tymgYjINell3VaSYIWyv8RQuHPIt8NeyW-ehAuqdHl/exec';
+
+        // 避免第一次由 Google Sheets 載入資料時，watch 又立即寫回去
+        const cloudReady = ref(false);
+        let saveTimer = null;
+        let saveInProgress = false;
+        let saveQueued = false;
+        let skipCloudSaveOnce = false;
+
+        // 儲存本機副本：Google Sheets 暫時連不到時仍可保留資料
+        const saveLocalBackup = (data) => {
+          try {
+            localStorage.setItem('hotel_workers_468', JSON.stringify(data));
+          } catch (e) {
+            console.warn('本機備份失敗', e);
           }
         };
 
+        // 由 Google Sheets 讀取全部資料
+        const loadFromGoogleSheets = async () => {
+          try {
+            const response = await fetch(API_URL, {
+              method: 'GET',
+              cache: 'no-store'
+            });
+
+            if (!response.ok) {
+              throw new Error(`Google Sheets 讀取失敗：HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            if (!data.success) {
+              throw new Error(data.error || 'Google Sheets 回傳錯誤');
+            }
+
+            skipCloudSaveOnce = true;
+            workers.value = Array.isArray(data.workers) ? data.workers : [];
+            saveLocalBackup(workers.value);
+            cloudReady.value = true;
+
+            console.log('Google Sheets 資料載入成功');
+          } catch (error) {
+            console.error('Google Sheets 讀取失敗：', error);
+
+            // 如果雲端暫時失敗，使用瀏覽器之前保存的副本
+            try {
+              const saved = localStorage.getItem('hotel_workers_468');
+              if (saved) {
+                skipCloudSaveOnce = true;
+                workers.value = JSON.parse(saved);
+                console.warn('已改用本機備份資料');
+              }
+            } catch (localError) {
+              console.error('本機備份讀取失敗：', localError);
+            }
+
+            // 仍然開放操作；之後 watch 會繼續嘗試同步
+            cloudReady.value = true;
+          }
+        };
+
+        // 將整份 workers 資料寫入 Google Sheets
+        const saveToGoogleSheets = async (data) => {
+          if (!cloudReady.value) return;
+
+          // 如果上一個儲存還未完成，完成後再補一次最新資料
+          if (saveInProgress) {
+            saveQueued = true;
+            return;
+          }
+
+          saveInProgress = true;
+
+          try {
+            const response = await fetch(API_URL, {
+              method: 'POST',
+              headers: {
+                // text/plain 可避免瀏覽器因 application/json 產生 CORS preflight
+                'Content-Type': 'text/plain;charset=utf-8'
+              },
+              body: JSON.stringify({
+                action: 'saveAll',
+                workers: data
+              })
+            });
+
+            if (!response.ok) {
+              throw new Error(`Google Sheets 儲存失敗：HTTP ${response.status}`);
+            }
+
+            const result = await response.json();
+
+            if (!result.success) {
+              throw new Error(result.error || 'Google Sheets 儲存失敗');
+            }
+
+            saveLocalBackup(data);
+            console.log('Google Sheets 儲存成功');
+          } catch (error) {
+            console.error('Google Sheets 儲存失敗：', error);
+            // 即使雲端失敗，也先保存本機副本
+            saveLocalBackup(data);
+          } finally {
+            saveInProgress = false;
+
+            if (saveQueued) {
+              saveQueued = false;
+              scheduleCloudSave(workers.value);
+            }
+          }
+        };
+
+        // 防止一次匯入很多行時，連續發出大量 API 請求
+        const scheduleCloudSave = (data) => {
+          clearTimeout(saveTimer);
+          saveTimer = setTimeout(() => {
+            saveToGoogleSheets(JSON.parse(JSON.stringify(data)));
+          }, 700);
+        };
+
+        // 所有新增、修改、刪除都會自動同步到 Google Sheets
         watch(workers, (newVal) => {
-          localStorage.setItem('hotel_workers_468', JSON.stringify(newVal));
+          saveLocalBackup(newVal);
+
+          if (skipCloudSaveOnce) {
+            skipCloudSaveOnce = false;
+            return;
+          }
+
+          if (cloudReady.value) {
+            scheduleCloudSave(newVal);
+          }
         }, { deep: true });
 
         // 累加連續 4 個星期的總工時
@@ -528,7 +653,7 @@
           dlAnchorElem.click();
         };
 
-        onMounted(initDefaultData);
+        onMounted(loadFromGoogleSheets);
 
         return {
           workers,
