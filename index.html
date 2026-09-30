@@ -320,7 +320,7 @@
 
         const cloudLoaded = ref(false);
         const cloudLoadFailed = ref(false);
-        const isInitializing = ref(true); // 新增防護：避免初始載入時誤觸發 POST 覆蓋
+        const isInitializing = ref(true);
         let saveTimer = null;
         let saveInProgress = false;
         let saveQueued = false;
@@ -347,13 +347,11 @@
           }
         };
 
-        // 核心修正 1：統一轉為 HH:mm 格式，相容 Google Sheets 回傳的 ISO 日期字串與數字
         const formatTimeStr = (val) => {
           if (val === null || val === undefined) return '';
           let str = String(val).trim();
           if (!str) return '';
 
-          // 處理來自 Google Sheets 的 ISO 時間字串 (例：1899-12-30T17:00:00.000Z)
           if (str.includes('T') || str.includes('1899') || str.includes('GMT')) {
             const d = new Date(str);
             if (!isNaN(d.getTime())) {
@@ -363,12 +361,10 @@
             }
           }
 
-          // 處理純數字小時，例：17 -> "17:00"
           if (/^\d{1,2}$/.test(str)) {
             return str.padStart(2, '0') + ':00';
           }
 
-          // 處理 "9:0" 或 "9:00" -> "09:00"
           if (/^\d{1,2}:\d{1,2}$/.test(str)) {
             const parts = str.split(':');
             return parts[0].padStart(2, '0') + ':' + parts[1].padStart(2, '0');
@@ -377,14 +373,12 @@
           return str;
         };
 
-        // 核心修正 2：相容處理字串化的 JSON shifts
         const normalizeWorkers = (list) => {
           if (!Array.isArray(list)) return [];
 
           return list.map((w, workerIndex) => {
             let rawShifts = w?.shifts;
             
-            // 如果 shifts 是字串，自動嘗試 JSON.parse 解析
             if (typeof rawShifts === 'string' && rawShifts.trim() !== '') {
               try {
                 rawShifts = JSON.parse(rawShifts);
@@ -417,7 +411,7 @@
 
         const loadFromGoogleSheets = async () => {
           cloudLoadFailed.value = false;
-          isInitializing.value = true; // 進入初始化階段
+          isInitializing.value = true;
 
           try {
             const response = await fetch(API_URL + '?t=' + Date.now(), {
@@ -435,28 +429,32 @@
               throw new Error(data?.error || 'Google Sheets 回傳資料格式錯誤');
             }
 
-            workers.value = normalizeWorkers(data.workers);
-            saveLocalBackup(workers.value);
+            const cloudWorkers = normalizeWorkers(data.workers);
+            const localWorkers = readLocalBackup();
+
+            // 安全防護：如果雲端返回 0 筆資料，但本地有備份資料，優先保留本地資料
+            if (cloudWorkers.length === 0 && localWorkers && localWorkers.length > 0) {
+              console.warn('雲端資料庫為空，自動恢復本地備份資料');
+              workers.value = normalizeWorkers(localWorkers);
+            } else {
+              workers.value = cloudWorkers;
+              saveLocalBackup(workers.value);
+            }
 
             cloudLoaded.value = true;
-            console.log('Google Sheets v2 載入成功：', workers.value.length, '位蛇仔');
           } catch (error) {
             cloudLoadFailed.value = true;
             console.error('Google Sheets 讀取失敗：', error);
 
             const local = readLocalBackup();
-
             if (local) {
               workers.value = normalizeWorkers(local);
-              console.warn('Google Sheets 暫時無法讀取，已使用本機備份。');
             } else {
               workers.value = [];
-              console.warn('沒有本機備份；暫時無法載入雲端資料。');
             }
 
             cloudLoaded.value = true;
           } finally {
-            // 延遲解除初始化狀態，避免 watch 誤觸發自動儲存
             setTimeout(() => {
               isInitializing.value = false;
             }, 800);
@@ -464,8 +462,7 @@
         };
 
         const saveToGoogleSheets = async (data) => {
-          if (!cloudLoaded.value || cloudLoadFailed.value || isInitializing.value) {
-            console.warn('跳過雲端儲存：Google Sheets 尚未準備就緒或正處於初始化讀取中。');
+          if (!cloudLoaded.value || isInitializing.value) {
             return;
           }
 
@@ -501,8 +498,9 @@
             }
 
             saveLocalBackup(payload.workers);
-            console.log('Google Sheets v2 儲存成功');
+            console.log('Google Sheets 儲存成功');
           } catch (error) {
+            alert('⚠️ 雲端儲存失敗！\n\n原因：' + error.message + '\n\n請確保 Google Apps Script 部署權限已設為「所有人 (Anyone)」。');
             console.error('Google Sheets 儲存失敗：', error);
             saveLocalBackup(data);
           } finally {
@@ -516,7 +514,7 @@
         };
 
         const scheduleCloudSave = (data) => {
-          if (!cloudLoaded.value || cloudLoadFailed.value || isInitializing.value) return;
+          if (!cloudLoaded.value || isInitializing.value) return;
 
           clearTimeout(saveTimer);
           saveTimer = setTimeout(() => {
@@ -527,8 +525,7 @@
         watch(workers, (newVal) => {
           saveLocalBackup(newVal);
 
-          // 防止初始化時自動覆蓋儲存
-          if (!isInitializing.value && cloudLoaded.value && !cloudLoadFailed.value) {
+          if (!isInitializing.value && cloudLoaded.value) {
             scheduleCloudSave(newVal);
           }
         }, { deep: true });
@@ -564,19 +561,9 @@
           });
         });
 
-        const dangerCount = computed(() =>
-          workersWithHours.value.filter(w => w.recent4WeekHours > 60).length
-        );
-
-        const warningCount = computed(() =>
-          workersWithHours.value.filter(w =>
-            w.recent4WeekHours >= 50 && w.recent4WeekHours <= 60
-          ).length
-        );
-
-        const safeCount = computed(() =>
-          workersWithHours.value.filter(w => w.recent4WeekHours < 50).length
-        );
+        const dangerCount = computed(() => workersWithHours.value.filter(w => w.recent4WeekHours > 60).length);
+        const warningCount = computed(() => workersWithHours.value.filter(w => w.recent4WeekHours >= 50 && w.recent4WeekHours <= 60).length);
+        const safeCount = computed(() => workersWithHours.value.filter(w => w.recent4WeekHours < 50).length);
 
         const getStatusBadgeClass = (hrs) => {
           if (hrs > 60) return 'bg-red-100 text-red-700 font-bold text-xs px-2.5 py-1 rounded-full border border-red-200';
@@ -673,7 +660,6 @@
 
           importText.value = '';
           showImportModal.value = false;
-          alert('更表解析成功！工時已即時更新。');
         };
 
         const addWorker = () => {
