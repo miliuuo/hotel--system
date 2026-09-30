@@ -318,16 +318,9 @@
 
         const API_URL = 'https://script.google.com/macros/s/AKfycbxyWUe4FtmszGxcZEDEeeoQ73tymgYjINell3VaSYIWyv8RQuHPIt8NeyW-ehAuqdHl/exec';
 
-        /*
-         * v2 sync rules:
-         * 1. Google Sheets is the shared source of truth.
-         * 2. Never overwrite cloud data with [] just because a GET failed.
-         * 3. During initial load, Vue watch must not POST back to the cloud.
-         * 4. Workers + Shifts are always saved together through saveAll.
-         * 5. Keep localStorage only as a fallback/cache.
-         */
         const cloudLoaded = ref(false);
         const cloudLoadFailed = ref(false);
+        const isInitializing = ref(true); // 新增防護：避免初始載入時誤觸發 POST 覆蓋
         let saveTimer = null;
         let saveInProgress = false;
         let saveQueued = false;
@@ -354,29 +347,77 @@
           }
         };
 
+        // 核心修正 1：統一轉為 HH:mm 格式，相容 Google Sheets 回傳的 ISO 日期字串與數字
+        const formatTimeStr = (val) => {
+          if (val === null || val === undefined) return '';
+          let str = String(val).trim();
+          if (!str) return '';
+
+          // 處理來自 Google Sheets 的 ISO 時間字串 (例：1899-12-30T17:00:00.000Z)
+          if (str.includes('T') || str.includes('1899') || str.includes('GMT')) {
+            const d = new Date(str);
+            if (!isNaN(d.getTime())) {
+              const hh = String(d.getHours()).padStart(2, '0');
+              const mm = String(d.getMinutes()).padStart(2, '0');
+              return `${hh}:${mm}`;
+            }
+          }
+
+          // 處理純數字小時，例：17 -> "17:00"
+          if (/^\d{1,2}$/.test(str)) {
+            return str.padStart(2, '0') + ':00';
+          }
+
+          // 處理 "9:0" 或 "9:00" -> "09:00"
+          if (/^\d{1,2}:\d{1,2}$/.test(str)) {
+            const parts = str.split(':');
+            return parts[0].padStart(2, '0') + ':' + parts[1].padStart(2, '0');
+          }
+
+          return str;
+        };
+
+        // 核心修正 2：相容處理字串化的 JSON shifts
         const normalizeWorkers = (list) => {
           if (!Array.isArray(list)) return [];
 
-          return list.map((w, workerIndex) => ({
-            id: String(w?.id ?? `${Date.now()}_${workerIndex}`),
-            name: String(w?.name ?? ''),
-            tags: Array.isArray(w?.tags)
-              ? w.tags.map(x => String(x))
-              : (w?.tags ? String(w.tags).split(',').map(x => x.trim()).filter(Boolean) : []),
-            shifts: Array.isArray(w?.shifts)
-              ? w.shifts.map((s, shiftIndex) => ({
+          return list.map((w, workerIndex) => {
+            let rawShifts = w?.shifts;
+            
+            // 如果 shifts 是字串，自動嘗試 JSON.parse 解析
+            if (typeof rawShifts === 'string' && rawShifts.trim() !== '') {
+              try {
+                rawShifts = JSON.parse(rawShifts);
+              } catch (e) {
+                console.warn('解析 shifts JSON 失敗：', e);
+                rawShifts = [];
+              }
+            }
+
+            const shifts = Array.isArray(rawShifts)
+              ? rawShifts.map((s, shiftIndex) => ({
                   id: String(s?.id ?? `${w?.id ?? workerIndex}_${shiftIndex}`),
                   date: String(s?.date ?? ''),
-                  startTime: String(s?.startTime ?? ''),
-                  endTime: String(s?.endTime ?? ''),
+                  startTime: formatTimeStr(s?.startTime),
+                  endTime: formatTimeStr(s?.endTime),
                   hours: Number(s?.hours) || 0
                 }))
-              : []
-          }));
+              : [];
+
+            return {
+              id: String(w?.id ?? `${Date.now()}_${workerIndex}`),
+              name: String(w?.name ?? ''),
+              tags: Array.isArray(w?.tags)
+                ? w.tags.map(x => String(x))
+                : (w?.tags ? String(w.tags).split(',').map(x => x.trim()).filter(Boolean) : []),
+              shifts: shifts
+            };
+          });
         };
 
         const loadFromGoogleSheets = async () => {
           cloudLoadFailed.value = false;
+          isInitializing.value = true; // 進入初始化階段
 
           try {
             const response = await fetch(API_URL + '?t=' + Date.now(), {
@@ -394,8 +435,6 @@
               throw new Error(data?.error || 'Google Sheets 回傳資料格式錯誤');
             }
 
-            // IMPORTANT:
-            // Only replace the app data after a successful cloud response.
             workers.value = normalizeWorkers(data.workers);
             saveLocalBackup(workers.value);
 
@@ -405,28 +444,28 @@
             cloudLoadFailed.value = true;
             console.error('Google Sheets 讀取失敗：', error);
 
-            // Do NOT write anything to Google Sheets when GET failed.
             const local = readLocalBackup();
 
             if (local) {
               workers.value = normalizeWorkers(local);
               console.warn('Google Sheets 暫時無法讀取，已使用本機備份。');
             } else {
-              // First-ever load and cloud failed: keep empty UI,
-              // but still do not consider it safe to overwrite cloud data.
               workers.value = [];
               console.warn('沒有本機備份；暫時無法載入雲端資料。');
             }
 
             cloudLoaded.value = true;
+          } finally {
+            // 延遲解除初始化狀態，避免 watch 誤觸發自動儲存
+            setTimeout(() => {
+              isInitializing.value = false;
+            }, 800);
           }
         };
 
         const saveToGoogleSheets = async (data) => {
-          // Never save before a successful initial GET.
-          // If initial GET failed, saving could accidentally wipe the cloud.
-          if (!cloudLoaded.value || cloudLoadFailed.value) {
-            console.warn('跳過雲端儲存：Google Sheets 初始讀取未成功。');
+          if (!cloudLoaded.value || cloudLoadFailed.value || isInitializing.value) {
+            console.warn('跳過雲端儲存：Google Sheets 尚未準備就緒或正處於初始化讀取中。');
             return;
           }
 
@@ -465,7 +504,6 @@
             console.log('Google Sheets v2 儲存成功');
           } catch (error) {
             console.error('Google Sheets 儲存失敗：', error);
-            // Local backup is still useful, but we do not retry aggressively.
             saveLocalBackup(data);
           } finally {
             saveInProgress = false;
@@ -478,7 +516,7 @@
         };
 
         const scheduleCloudSave = (data) => {
-          if (!cloudLoaded.value || cloudLoadFailed.value) return;
+          if (!cloudLoaded.value || cloudLoadFailed.value || isInitializing.value) return;
 
           clearTimeout(saveTimer);
           saveTimer = setTimeout(() => {
@@ -487,12 +525,10 @@
         };
 
         watch(workers, (newVal) => {
-          // Always keep a local backup.
           saveLocalBackup(newVal);
 
-          // IMPORTANT:
-          // Only save after a successful/verified cloud load.
-          if (cloudLoaded.value && !cloudLoadFailed.value) {
+          // 防止初始化時自動覆蓋儲存
+          if (!isInitializing.value && cloudLoaded.value && !cloudLoadFailed.value) {
             scheduleCloudSave(newVal);
           }
         }, { deep: true });
