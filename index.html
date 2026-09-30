@@ -308,27 +308,32 @@
         const showImportModal = ref(false);
         const showAddWorkerModal = ref(false);
         const selectedWorker = ref(null);
-        
-        // 追蹤目前正在編輯哪一行的時間
         const editingShiftIdx = ref(null);
 
         const importYear = ref(new Date().getFullYear());
-        const defaultEndHour = ref(23); // 預設晚上 23:00 收工
-        const timeMode = ref('24h');    // 預設採用 24 小時制
+        const defaultEndHour = ref(23);
+        const timeMode = ref('24h');
         const importText = ref('');
         const newWorker = ref({ name: '', tagsInput: '' });
 
-        // Google Apps Script Web App API
         const API_URL = 'https://script.google.com/macros/s/AKfycbxyWUe4FtmszGxcZEDEeeoQ73tymgYjINell3VaSYIWyv8RQuHPIt8NeyW-ehAuqdHl/exec';
 
-        // 避免第一次由 Google Sheets 載入資料時，watch 又立即寫回去
-        const cloudReady = ref(false);
+        /*
+         * v2 sync rules:
+         * 1. Google Sheets is the shared source of truth.
+         * 2. Never overwrite cloud data with [] just because a GET failed.
+         * 3. During initial load, Vue watch must not POST back to the cloud.
+         * 4. Workers + Shifts are always saved together through saveAll.
+         * 5. Keep localStorage only as a fallback/cache.
+         */
+        const cloudLoaded = ref(false);
+        const cloudLoadFailed = ref(false);
         let saveTimer = null;
         let saveInProgress = false;
         let saveQueued = false;
-        let skipCloudSaveOnce = false;
 
-        // 儲存本機副本：Google Sheets 暫時連不到時仍可保留資料
+        const cloneData = (data) => JSON.parse(JSON.stringify(data));
+
         const saveLocalBackup = (data) => {
           try {
             localStorage.setItem('hotel_workers_468', JSON.stringify(data));
@@ -337,10 +342,44 @@
           }
         };
 
-        // 由 Google Sheets 讀取全部資料
-        const loadFromGoogleSheets = async () => {
+        const readLocalBackup = () => {
           try {
-            const response = await fetch(API_URL, {
+            const saved = localStorage.getItem('hotel_workers_468');
+            if (!saved) return null;
+            const parsed = JSON.parse(saved);
+            return Array.isArray(parsed) ? parsed : null;
+          } catch (e) {
+            console.error('本機備份讀取失敗', e);
+            return null;
+          }
+        };
+
+        const normalizeWorkers = (list) => {
+          if (!Array.isArray(list)) return [];
+
+          return list.map((w, workerIndex) => ({
+            id: String(w?.id ?? `${Date.now()}_${workerIndex}`),
+            name: String(w?.name ?? ''),
+            tags: Array.isArray(w?.tags)
+              ? w.tags.map(x => String(x))
+              : (w?.tags ? String(w.tags).split(',').map(x => x.trim()).filter(Boolean) : []),
+            shifts: Array.isArray(w?.shifts)
+              ? w.shifts.map((s, shiftIndex) => ({
+                  id: String(s?.id ?? `${w?.id ?? workerIndex}_${shiftIndex}`),
+                  date: String(s?.date ?? ''),
+                  startTime: String(s?.startTime ?? ''),
+                  endTime: String(s?.endTime ?? ''),
+                  hours: Number(s?.hours) || 0
+                }))
+              : []
+          }));
+        };
+
+        const loadFromGoogleSheets = async () => {
+          cloudLoadFailed.value = false;
+
+          try {
+            const response = await fetch(API_URL + '?t=' + Date.now(), {
               method: 'GET',
               cache: 'no-store'
             });
@@ -351,41 +390,46 @@
 
             const data = await response.json();
 
-            if (!data.success) {
-              throw new Error(data.error || 'Google Sheets 回傳錯誤');
+            if (!data || data.success !== true || !Array.isArray(data.workers)) {
+              throw new Error(data?.error || 'Google Sheets 回傳資料格式錯誤');
             }
 
-            skipCloudSaveOnce = true;
-            workers.value = Array.isArray(data.workers) ? data.workers : [];
+            // IMPORTANT:
+            // Only replace the app data after a successful cloud response.
+            workers.value = normalizeWorkers(data.workers);
             saveLocalBackup(workers.value);
-            cloudReady.value = true;
 
-            console.log('Google Sheets 資料載入成功');
+            cloudLoaded.value = true;
+            console.log('Google Sheets v2 載入成功：', workers.value.length, '位蛇仔');
           } catch (error) {
+            cloudLoadFailed.value = true;
             console.error('Google Sheets 讀取失敗：', error);
 
-            // 如果雲端暫時失敗，使用瀏覽器之前保存的副本
-            try {
-              const saved = localStorage.getItem('hotel_workers_468');
-              if (saved) {
-                skipCloudSaveOnce = true;
-                workers.value = JSON.parse(saved);
-                console.warn('已改用本機備份資料');
-              }
-            } catch (localError) {
-              console.error('本機備份讀取失敗：', localError);
+            // Do NOT write anything to Google Sheets when GET failed.
+            const local = readLocalBackup();
+
+            if (local) {
+              workers.value = normalizeWorkers(local);
+              console.warn('Google Sheets 暫時無法讀取，已使用本機備份。');
+            } else {
+              // First-ever load and cloud failed: keep empty UI,
+              // but still do not consider it safe to overwrite cloud data.
+              workers.value = [];
+              console.warn('沒有本機備份；暫時無法載入雲端資料。');
             }
 
-            // 仍然開放操作；之後 watch 會繼續嘗試同步
-            cloudReady.value = true;
+            cloudLoaded.value = true;
           }
         };
 
-        // 將整份 workers 資料寫入 Google Sheets
         const saveToGoogleSheets = async (data) => {
-          if (!cloudReady.value) return;
+          // Never save before a successful initial GET.
+          // If initial GET failed, saving could accidentally wipe the cloud.
+          if (!cloudLoaded.value || cloudLoadFailed.value) {
+            console.warn('跳過雲端儲存：Google Sheets 初始讀取未成功。');
+            return;
+          }
 
-          // 如果上一個儲存還未完成，完成後再補一次最新資料
           if (saveInProgress) {
             saveQueued = true;
             return;
@@ -394,16 +438,17 @@
           saveInProgress = true;
 
           try {
+            const payload = {
+              action: 'saveAll',
+              workers: normalizeWorkers(data)
+            };
+
             const response = await fetch(API_URL, {
               method: 'POST',
               headers: {
-                // text/plain 可避免瀏覽器因 application/json 產生 CORS preflight
                 'Content-Type': 'text/plain;charset=utf-8'
               },
-              body: JSON.stringify({
-                action: 'saveAll',
-                workers: data
-              })
+              body: JSON.stringify(payload)
             });
 
             if (!response.ok) {
@@ -412,15 +457,15 @@
 
             const result = await response.json();
 
-            if (!result.success) {
-              throw new Error(result.error || 'Google Sheets 儲存失敗');
+            if (!result || result.success !== true) {
+              throw new Error(result?.error || 'Google Sheets 儲存失敗');
             }
 
-            saveLocalBackup(data);
-            console.log('Google Sheets 儲存成功');
+            saveLocalBackup(payload.workers);
+            console.log('Google Sheets v2 儲存成功');
           } catch (error) {
             console.error('Google Sheets 儲存失敗：', error);
-            // 即使雲端失敗，也先保存本機副本
+            // Local backup is still useful, but we do not retry aggressively.
             saveLocalBackup(data);
           } finally {
             saveInProgress = false;
@@ -432,31 +477,28 @@
           }
         };
 
-        // 防止一次匯入很多行時，連續發出大量 API 請求
         const scheduleCloudSave = (data) => {
+          if (!cloudLoaded.value || cloudLoadFailed.value) return;
+
           clearTimeout(saveTimer);
           saveTimer = setTimeout(() => {
-            saveToGoogleSheets(JSON.parse(JSON.stringify(data)));
+            saveToGoogleSheets(cloneData(data));
           }, 700);
         };
 
-        // 所有新增、修改、刪除都會自動同步到 Google Sheets
         watch(workers, (newVal) => {
+          // Always keep a local backup.
           saveLocalBackup(newVal);
 
-          if (skipCloudSaveOnce) {
-            skipCloudSaveOnce = false;
-            return;
-          }
-
-          if (cloudReady.value) {
+          // IMPORTANT:
+          // Only save after a successful/verified cloud load.
+          if (cloudLoaded.value && !cloudLoadFailed.value) {
             scheduleCloudSave(newVal);
           }
         }, { deep: true });
 
-        // 累加連續 4 個星期的總工時
         const calculate4WeekHours = (shifts) => {
-          if (!shifts || shifts.length === 0) return 0;
+          if (!Array.isArray(shifts) || shifts.length === 0) return 0;
           return shifts.reduce((total, s) => total + (Number(s.hours) || 0), 0);
         };
 
@@ -469,21 +511,36 @@
 
         const filteredWorkers = computed(() => {
           return workersWithHours.value.filter(w => {
-            const matchesSearch = w.name.includes(searchQuery.value) || 
+            const matchesSearch =
+              w.name.includes(searchQuery.value) ||
               (w.tags && w.tags.some(t => t.includes(searchQuery.value)));
-            
+
             let matchesStatus = true;
-            if (statusFilter.value === '高危爆鐘') matchesStatus = w.recent4WeekHours > 60;
-            else if (statusFilter.value === '預警區') matchesStatus = w.recent4WeekHours >= 50 && w.recent4WeekHours <= 60;
-            else if (statusFilter.value === '安全區') matchesStatus = w.recent4WeekHours < 50;
+            if (statusFilter.value === '高危爆鐘') {
+              matchesStatus = w.recent4WeekHours > 60;
+            } else if (statusFilter.value === '預警區') {
+              matchesStatus = w.recent4WeekHours >= 50 && w.recent4WeekHours <= 60;
+            } else if (statusFilter.value === '安全區') {
+              matchesStatus = w.recent4WeekHours < 50;
+            }
 
             return matchesSearch && matchesStatus;
           });
         });
 
-        const dangerCount = computed(() => workersWithHours.value.filter(w => w.recent4WeekHours > 60).length);
-        const warningCount = computed(() => workersWithHours.value.filter(w => w.recent4WeekHours >= 50 && w.recent4WeekHours <= 60).length);
-        const safeCount = computed(() => workersWithHours.value.filter(w => w.recent4WeekHours < 50).length);
+        const dangerCount = computed(() =>
+          workersWithHours.value.filter(w => w.recent4WeekHours > 60).length
+        );
+
+        const warningCount = computed(() =>
+          workersWithHours.value.filter(w =>
+            w.recent4WeekHours >= 50 && w.recent4WeekHours <= 60
+          ).length
+        );
+
+        const safeCount = computed(() =>
+          workersWithHours.value.filter(w => w.recent4WeekHours < 50).length
+        );
 
         const getStatusBadgeClass = (hrs) => {
           if (hrs > 60) return 'bg-red-100 text-red-700 font-bold text-xs px-2.5 py-1 rounded-full border border-red-200';
@@ -514,7 +571,7 @@
 
           const lines = importText.value.split('\n');
           let currentDateStr = '';
-          let currentStartHour = 17; 
+          let currentStartHour = 17;
 
           lines.forEach(line => {
             const cleanLine = line.trim();
@@ -536,14 +593,12 @@
               return;
             } else if (pointMatch) {
               let h = parseInt(pointMatch[1]);
-              if (timeMode.value === '12h') {
-                if (h < 10) h += 12; 
-              }
+              if (timeMode.value === '12h' && h < 10) h += 12;
               currentStartHour = h;
               return;
             }
 
-            const nameMatch = cleanLine.match(/^(?:\d+[\.、\s]*)?([^\s（(]+)\s*(.*)/);
+            const nameMatch = cleanLine.match(/^(?:\d+[\.\、\s]*)?([^\s（(]+)\s*(.*)/);
             if (nameMatch && currentDateStr) {
               const name = nameMatch[1].trim();
               const rawTag = nameMatch[2].trim();
@@ -555,23 +610,27 @@
               const endTimeStr = `${endH.toString().padStart(2, '0')}:00`;
 
               let worker = workers.value.find(w => w.name === name);
+
               if (!worker) {
                 const tags = [];
                 if (rawTag) tags.push(rawTag.replace(/[（）()]/g, ''));
+
                 worker = {
                   id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
-                  name: name,
-                  tags: tags,
+                  name,
+                  tags,
                   shifts: []
                 };
+
                 workers.value.push(worker);
               }
 
               worker.shifts.push({
+                id: `${worker.id}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
                 date: currentDateStr,
                 startTime: startTimeStr,
                 endTime: endTimeStr,
-                hours: hours
+                hours
               });
             }
           });
@@ -583,14 +642,15 @@
 
         const addWorker = () => {
           if (!newWorker.value.name.trim()) return;
-          const tags = newWorker.value.tagsInput 
+
+          const tags = newWorker.value.tagsInput
             ? newWorker.value.tagsInput.split(/[,，]/).map(t => t.trim()).filter(Boolean)
             : [];
 
           workers.value.push({
             id: Date.now().toString(),
             name: newWorker.value.name.trim(),
-            tags: tags,
+            tags,
             shifts: []
           });
 
@@ -606,17 +666,16 @@
 
         const openShiftHistory = (worker) => {
           selectedWorker.value = worker;
-          editingShiftIdx.value = null; // 打開明細時重置編輯狀態
+          editingShiftIdx.value = null;
         };
 
         const removeShift = (workerId, shiftIdx) => {
           const w = workers.value.find(x => x.id === workerId);
-          if (w) {
+          if (w && Array.isArray(w.shifts)) {
             w.shifts.splice(shiftIdx, 1);
           }
         };
 
-        // 按下儲存按鈕時執行：計算工時並退出編輯模式
         const saveShiftTime = (shift) => {
           if (!shift.startTime || !shift.endTime) return;
 
@@ -626,30 +685,31 @@
 
             if (isNaN(startH) || isNaN(endH)) return;
 
-            let startTotal = startH + (isNaN(startM) ? 0 : startM / 60);
+            const startTotal = startH + (isNaN(startM) ? 0 : startM / 60);
             let endTotal = endH + (isNaN(endM) ? 0 : endM / 60);
 
             let hours = endTotal - startTotal;
-            
-            // 跨夜處理
-            if (hours < 0) {
-              hours += 24;
-            }
+            if (hours < 0) hours += 24;
 
             shift.hours = Math.round(hours * 100) / 100;
           } catch (e) {
-            console.error("時間解析錯誤", e);
+            console.error('時間解析錯誤', e);
           }
 
-          // 關閉編輯模式
           editingShiftIdx.value = null;
         };
 
         const exportData = () => {
-          const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(workers.value, null, 2));
+          const dataStr =
+            "data:text/json;charset=utf-8," +
+            encodeURIComponent(JSON.stringify(workers.value, null, 2));
+
           const dlAnchorElem = document.createElement('a');
           dlAnchorElem.setAttribute("href", dataStr);
-          dlAnchorElem.setAttribute("download", `hotel_workers_backup_${new Date().toISOString().slice(0,10)}.json`);
+          dlAnchorElem.setAttribute(
+            "download",
+            `hotel_workers_backup_${new Date().toISOString().slice(0,10)}.json`
+          );
           dlAnchorElem.click();
         };
 
@@ -666,7 +726,7 @@
           showImportModal,
           showAddWorkerModal,
           selectedWorker,
-          editingShiftIdx, // 回傳給 HTML 控制介面
+          editingShiftIdx,
           importYear,
           defaultEndHour,
           timeMode,
@@ -681,7 +741,7 @@
           deleteWorker,
           openShiftHistory,
           removeShift,
-          saveShiftTime, // 儲存並計算的 function
+          saveShiftTime,
           exportData
         };
       }
