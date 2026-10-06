@@ -500,7 +500,7 @@
             saveLocalBackup(payload.workers);
             console.log('Google Sheets 儲存成功');
           } catch (error) {
-            alert('⚠️ 雲端儲存失敗！\n\n原因：' + error.message + '\n\n請確保 Google Apps Script 部署權限已設為「所有人 (Anyone)」。');
+            alert('⚠️️ 雲端儲存失敗！\n\n原因：' + error.message + '\n\n請確保 Google Apps Script 部署權限已設為「所有人 (Anyone)」。');
             console.error('Google Sheets 儲存失敗：', error);
             saveLocalBackup(data);
           } finally {
@@ -627,7 +627,10 @@
               const rawTag = nameMatch[2].trim();
 
               const endH = defaultEndHour.value || 23;
-              const hours = Math.max(endH - currentStartHour, 0);
+              
+              // 修正通宵更計算 (例如 23點返到 6點)
+              let hours = endH - currentStartHour;
+              if (hours < 0) hours += 24; 
 
               const startTimeStr = `${currentStartHour.toString().padStart(2, '0')}:00`;
               const endTimeStr = `${endH.toString().padStart(2, '0')}:00`;
